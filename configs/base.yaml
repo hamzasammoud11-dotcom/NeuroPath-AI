@@ -1,0 +1,18 @@
+experiment:
+  name: neuropath-brain
+  seed: 42
+
+model:
+  imaging:
+    type: simple3dcnn
+    in_channels: 1
+    feature_dim: 128
+  fusion:
+    genetics_dim: 8
+    clinical_dim: 6
+    hidden_dim: 128
+
+training:
+  batch_size: 2
+  steps: 5
+  learning_rate: 0.001

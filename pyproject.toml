@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuro-path-ai"
+version = "0.1.0"
+dependencies = [
+    # Dependencies can be added here if needed, or read from requirements.txt
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
