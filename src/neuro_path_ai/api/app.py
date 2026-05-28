@@ -36,12 +36,14 @@ TABULAR_DIM_ENV = os.getenv("NEUROPATH_TABULAR_DIM")
 _model: FusionModel | None = None
 _target_layer: torch.nn.Module | None = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_tabular_dim: int = 14  # Default value, will be overridden at startup
+TABULAR_DIM: int = 14  # Backward-compatible alias for any lingering references
 
 
 def _load_checkpoint_state(checkpoint: Path) -> dict[str, torch.Tensor] | None:
     if not checkpoint.exists():
         return None
-    payload = torch.load(checkpoint, map_location=_device)
+    payload = torch.load(checkpoint, map_location=_device, weights_only=False)
     if isinstance(payload, dict) and "model_state_dict" in payload:
         state_dict = payload["model_state_dict"]
     else:
@@ -121,10 +123,21 @@ def _load_model() -> FusionModel:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _model, _target_layer
+    global _model, _target_layer, _tabular_dim, TABULAR_DIM
+    checkpoint = Path(MODEL_CHECKPOINT)
+    state_dict = _load_checkpoint_state(checkpoint)
+    _tabular_dim = _resolve_tabular_dim(state_dict)
+    TABULAR_DIM = _tabular_dim
     _model = _load_model().to(_device)
     _model.eval()
     _target_layer = find_default_target_layer(_model.imaging_backbone)
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    if _model is None:
+        raise HTTPException(status_code=503, detail="Model not initialized")
+    return {"status": "ok"}
 
 
 @app.post("/predict")
@@ -133,9 +146,6 @@ async def predict(
     clinical_json: str = Form(...),
 ) -> dict[str, Any]:
     # Add a debug try/except to return trace details for local testing
-    if nib is None:
-        raise HTTPException(status_code=500, detail="nibabel is required for NIfTI handling")
-
     try:
         payload = json.loads(clinical_json)
         if not isinstance(payload, dict):
@@ -219,6 +229,9 @@ def _load_volume(file_path: Path) -> tuple[torch.Tensor, GridMeta | None, str | 
         )
         return tensor, meta, warning
 
+    if nib is None:
+        raise HTTPException(status_code=500, detail="nibabel is required for NIfTI handling")
+
     volume = nib.load(str(file_path)).get_fdata().astype("float32")
     tensor = torch.from_numpy(volume).unsqueeze(0).unsqueeze(0)
     return tensor, None, None
@@ -230,20 +243,20 @@ def _prepare_tabular_features(clinical_vector: list[float]) -> tuple[torch.Tenso
 
     clinical = normalize_clinical(clinical_vector)
     current_dim = int(clinical.shape[0])
-    if current_dim == TABULAR_DIM:
+    if current_dim == _tabular_dim:
         return clinical.unsqueeze(0), None
 
-    if current_dim < TABULAR_DIM:
-        padded = torch.zeros((TABULAR_DIM,), dtype=clinical.dtype)
+    if current_dim < _tabular_dim:
+        padded = torch.zeros((_tabular_dim,), dtype=clinical.dtype)
         padded[:current_dim] = clinical
         warning = (
-            f"Received {current_dim} tabular features; padded to {TABULAR_DIM} "
+            f"Received {current_dim} tabular features; padded to {_tabular_dim} "
             "with zeros to match the trained model."
         )
         return padded.unsqueeze(0), warning
 
-    warning = f"Received {current_dim} tabular features; truncated to {TABULAR_DIM} to match the trained model."
-    return clinical[:TABULAR_DIM].unsqueeze(0), warning
+    warning = f"Received {current_dim} tabular features; truncated to {_tabular_dim} to match the trained model."
+    return clinical[:_tabular_dim].unsqueeze(0), warning
 
 
 def _merge_warnings(*warnings: str | None) -> str | None:

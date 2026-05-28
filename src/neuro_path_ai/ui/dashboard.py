@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
@@ -482,6 +487,110 @@ html, body, section, div, [data-testid="stAppViewContainer"] {
 
 st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
+_DEFAULT_API_URL = os.getenv("NEUROPATH_API_URL", "http://localhost:8000/predict")
+_API_STARTUP_TIMEOUT = 12
+_API_STARTUP_RETRY_DELAY = 0.5
+
+
+def _normalize_api_url(api_url: str) -> str:
+    if "://" not in api_url:
+        return f"http://{api_url}"
+    return api_url
+
+
+def _resolve_api_urls(api_url: str) -> tuple[str, str, str, str | None, int | None]:
+    parsed = urlparse(api_url)
+    hostname = parsed.hostname
+    port = parsed.port
+    normalized_host = "127.0.0.1" if hostname == "0.0.0.0" else hostname
+    netloc = ""
+    if normalized_host:
+        netloc = f"{normalized_host}:{port}" if port is not None else normalized_host
+    else:
+        netloc = parsed.netloc
+    base = f"{parsed.scheme}://{netloc}"
+    path = parsed.path if parsed.path and parsed.path != "/" else "/predict"
+    predict_url = f"{base}{path}"
+    health_url = f"{base}/health"
+    return base, predict_url, health_url, normalized_host, port
+
+
+def _is_local_host(hostname: str | None) -> bool:
+    return hostname in {"localhost", "127.0.0.1", "0.0.0.0"}
+
+
+def _check_api_health(health_url: str) -> bool:
+    try:
+        response = requests.get(health_url, timeout=2)
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
+
+
+def _wait_for_api(health_url: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _check_api_health(health_url):
+            return True
+        time.sleep(_API_STARTUP_RETRY_DELAY)
+    return False
+
+
+def _start_local_api(host: str, port: int) -> subprocess.Popen:
+    project_root = Path(__file__).resolve().parents[3]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{project_root}{os.pathsep}{project_root / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "neuro_path_ai.api.app:app",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+    return subprocess.Popen(
+        command,
+        cwd=str(project_root),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _ensure_api_running(api_url: str) -> tuple[str, bool, str]:
+    normalized_url = _normalize_api_url(api_url.strip())
+    _, predict_url, health_url, hostname, port = _resolve_api_urls(normalized_url)
+    if not hostname:
+        return predict_url, False, "Invalid API URL. Please include a host."
+
+    if not _is_local_host(hostname):
+        is_ready = _check_api_health(health_url)
+        status = "Remote API connected." if is_ready else "Remote API not reachable. Check the URL or server."
+        return predict_url, is_ready, status
+
+    if _check_api_health(health_url):
+        return predict_url, True, "Local API connected."
+
+    if st.session_state.get("api_autostart_attempted"):
+        return predict_url, False, "Local API not reachable. Start it manually or check logs."
+
+    st.session_state["api_autostart_attempted"] = True
+    selected_host = "127.0.0.1" if hostname in {"localhost", "127.0.0.1"} else hostname
+    selected_port = port or 8000
+
+    try:
+        proc = _start_local_api(selected_host, selected_port)
+    except (OSError, ValueError) as exc:
+        return predict_url, False, f"Failed to start local API: {exc}"
+
+    st.session_state["api_process_pid"] = proc.pid
+    if _wait_for_api(health_url, timeout=_API_STARTUP_TIMEOUT):
+        return predict_url, True, "Local API started automatically."
+    return predict_url, False, "Local API failed to start. Verify model files and dependencies."
+
+
 
 # NeuroPath AI Logo SVG (embedded)
 def get_logo_svg() -> str:
@@ -559,7 +668,17 @@ def main() -> None:
     # Main content with sidebar
     with st.sidebar:
         st.markdown('<div class="sidebar-label">⚙️ Configuration</div>', unsafe_allow_html=True)
-        api_url = st.text_input("FastAPI URL", value="http://localhost:8000/predict", help="Enter your API endpoint")
+        api_url = st.text_input("FastAPI URL", value=_DEFAULT_API_URL, help="Enter your API endpoint")
+        api_url = _normalize_api_url(api_url.strip())
+        if st.session_state.get("api_last_url") != api_url:
+            st.session_state["api_last_url"] = api_url
+            st.session_state.pop("api_autostart_attempted", None)
+
+        predict_url, api_ready, api_status = _ensure_api_running(api_url)
+        if api_ready:
+            st.success(api_status)
+        else:
+            st.warning(api_status)
         
         st.markdown('<div class="sidebar-label">👤 Patient Information</div>', unsafe_allow_html=True)
         with st.expander("Clinical Data", expanded=True):
@@ -615,17 +734,23 @@ def main() -> None:
         if st.button("🔬 Analyze Now", use_container_width=True):
             # Call API with spinner
             with st.spinner("🧠 NeuroPath AI is analyzing your scan..."):
-                response = _call_api(api_url, uploaded, clinical_payload)
+                response = _call_api(predict_url, uploaded, clinical_payload)
             if response is not None:
                 _render_results(uploaded, response)
 
 
 def _call_api(api_url: str, uploaded: st.runtime.uploaded_file_manager.UploadedFile, clinical_payload: dict[str, Any]) -> dict[str, Any] | None:
+    normalized_url = _normalize_api_url(api_url)
+    _, predict_url, health_url, _, _ = _resolve_api_urls(normalized_url)
+    if not _check_api_health(health_url):
+        st.error("API is not ready. Start the FastAPI service or update the URL.")
+        return None
+
     files = {"nifti_file": (uploaded.name, uploaded.getvalue())}
     data = {"clinical_json": json.dumps(clinical_payload)}
 
     try:
-        result = requests.post(api_url, files=files, data=data, timeout=120)
+        result = requests.post(predict_url, files=files, data=data, timeout=120)
     except requests.RequestException as exc:
         st.error(f"API request failed: {exc}")
         return None

@@ -18,6 +18,27 @@ This repo now contains the first pass of the AI brain scaffold: multimodal data 
 2. Run the synthetic training loop:
 	- python scripts/train_brain.py --synthetic
 
+### Checkpoint Recovery
+If the `.pt` files appear as tiny Git LFS pointers after a pull, restore them with:
+
+```bash
+python scripts/restore_checkpoints.py
+```
+
+If you prefer the raw Git LFS command, use:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+### Dashboard + API
+1. Start the FastAPI server (optional if using localhost auto-start):
+	- python -m uvicorn neuro_path_ai.api.app:app --host 0.0.0.0 --port 8000
+2. Launch the Streamlit dashboard:
+	- streamlit run src/neuro_path_ai/ui/dashboard.py
+3. When the API URL is set to http://localhost:8000, the dashboard will auto-start the API if it is not already running.
+
 ### Next Steps
 - Wire real ADNI manifests into data loaders
 - Replace synthetic MRI loader with nibabel/monai pipeline
