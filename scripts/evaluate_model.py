@@ -7,7 +7,7 @@ import torch
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader
 
-from neuro_path_ai.data.dataset import NiftiDataset, SampleRecord, load_adni_merge_records
+from neuro_path_ai.data.dataset import NiftiDataset, SampleRecord, load_adni_merge_records, FeatureConfig
 from neuro_path_ai.evaluation.metrics import compute_binary_metrics
 from neuro_path_ai.models.fusion import FusionModel
 from neuro_path_ai.models.imaging import Simple3DCNN, build_resnet18_backbone
@@ -15,7 +15,9 @@ from neuro_path_ai.models.imaging import Simple3DCNN, build_resnet18_backbone
 
 def _load_records(args: argparse.Namespace) -> list[SampleRecord]:
     if args.adni_merge and args.imaging_index:
-        return load_adni_merge_records(Path(args.adni_merge), Path(args.imaging_index))
+        # Default to binary mapping (CN vs AD) for evaluation unless otherwise configured
+        diagnosis_map = {"CN": 0, "AD": 1}
+        return load_adni_merge_records(Path(args.adni_merge), Path(args.imaging_index), diagnosis_map=diagnosis_map)
     raise SystemExit("Provide --adni-merge and --imaging-index for evaluation.")
 
 
@@ -50,13 +52,30 @@ def evaluate() -> None:
     if not records:
         raise SystemExit("No records found for evaluation.")
 
-    dataset = NiftiDataset(records, root=Path(args.data_root), return_subject_id=True)
+    # Build a feature config with consistent genetics categories across records
+    genetics_categories = sorted({int(v) for r in records for v in r.genetics_vector if v is not None})
+    feature_config = FeatureConfig(genetics_categories=genetics_categories)
+    dataset = NiftiDataset(records, root=Path(args.data_root), feature_config=feature_config, return_subject_id=True)
     data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-    tabular_dim = len(records[0].genetics_vector) + len(records[0].clinical_vector)
-    model = _build_model(tabular_dim, args)
+    record_tabular_dim = len(records[0].genetics_vector) + len(records[0].clinical_vector)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+
+    # Load checkpoint first so we can infer expected tabular input size
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        state_dict = ckpt["model_state_dict"]
+    else:
+        state_dict = ckpt
+
+    # Infer tabular input dim from checkpoint if available
+    ckpt_tabular_dim = None
+    if isinstance(state_dict, dict) and "tabular_encoder.net.0.weight" in state_dict:
+        ckpt_tabular_dim = state_dict["tabular_encoder.net.0.weight"].shape[1]
+
+    tabular_dim = int(ckpt_tabular_dim) if ckpt_tabular_dim is not None else record_tabular_dim
+    model = _build_model(tabular_dim, args)
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
 
@@ -71,6 +90,12 @@ def evaluate() -> None:
             mri, features, labels, subject_ids = batch
             mri = mri.to(device)
             features = features.to(device)
+            # Pad tabular features if checkpoint expects larger tabular input
+            if features.shape[1] < tabular_dim:
+                import torch.nn.functional as F
+
+                pad_size = tabular_dim - features.shape[1]
+                features = F.pad(features, (0, pad_size))
             labels = labels.to(device)
 
             if args.mc_dropout_runs and args.mc_dropout_runs > 1:

@@ -30,31 +30,92 @@ except ImportError:  # pragma: no cover - optional dependency
 app = FastAPI(title="NeuroPath AI Inference API")
 
 MODEL_CHECKPOINT = os.getenv("NEUROPATH_MODEL", "artifacts/checkpoints/best_model.pt")
-PRETRAINED_BACKBONE = os.getenv("NEUROPATH_BACKBONE", "resnet18")
-TABULAR_DIM = int(os.getenv("NEUROPATH_TABULAR_DIM", "14"))
+BACKBONE_STRATEGY = os.getenv("NEUROPATH_BACKBONE", "auto").lower()
+TABULAR_DIM_ENV = os.getenv("NEUROPATH_TABULAR_DIM")
 
 _model: FusionModel | None = None
 _target_layer: torch.nn.Module | None = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _load_checkpoint_state(checkpoint: Path) -> dict[str, torch.Tensor] | None:
+    if not checkpoint.exists():
+        return None
+    payload = torch.load(checkpoint, map_location=_device)
+    if isinstance(payload, dict) and "model_state_dict" in payload:
+        state_dict = payload["model_state_dict"]
+    else:
+        state_dict = payload
+    if not isinstance(state_dict, dict):
+        raise ValueError("Checkpoint does not contain a model state dict.")
+    return state_dict
+
+
+def _infer_backbone(state_dict: dict[str, torch.Tensor]) -> str | None:
+    if any(
+        key.startswith("imaging_backbone.layer")
+        or key.startswith("imaging_backbone.conv1")
+        for key in state_dict
+    ):
+        return "resnet18"
+    if any(
+        key.startswith("imaging_backbone.encoder")
+        or key.startswith("imaging_backbone.projection")
+        for key in state_dict
+    ):
+        return "simple3d"
+    return None
+
+
+def _infer_tabular_dim(state_dict: dict[str, torch.Tensor]) -> int | None:
+    weight = state_dict.get("tabular_encoder.net.0.weight")
+    if weight is None:
+        return None
+    return int(weight.shape[1])
+
+
+def _resolve_backbone(state_dict: dict[str, torch.Tensor] | None) -> str:
+    if BACKBONE_STRATEGY not in {"auto", "simple3d", "resnet18"}:
+        raise ValueError("NEUROPATH_BACKBONE must be one of: auto, simple3d, resnet18.")
+    if BACKBONE_STRATEGY != "auto":
+        return BACKBONE_STRATEGY
+    if state_dict is None:
+        return "simple3d"
+    inferred = _infer_backbone(state_dict)
+    if inferred is None:
+        raise ValueError("Unable to infer backbone from checkpoint. Set NEUROPATH_BACKBONE explicitly.")
+    return inferred
+
+
+def _resolve_tabular_dim(state_dict: dict[str, torch.Tensor] | None) -> int:
+    if TABULAR_DIM_ENV is not None:
+        return int(TABULAR_DIM_ENV)
+    inferred = _infer_tabular_dim(state_dict) if state_dict is not None else None
+    return inferred if inferred is not None else 14
+
+
 def _load_model() -> FusionModel:
-    if PRETRAINED_BACKBONE == "resnet18":
+    checkpoint = Path(MODEL_CHECKPOINT)
+    state_dict = _load_checkpoint_state(checkpoint)
+    backbone_name = _resolve_backbone(state_dict)
+    tabular_dim = _resolve_tabular_dim(state_dict)
+
+    if backbone_name == "resnet18":
         # Do not attempt to load MedicalNet pretrained weights by default
         backbone = build_resnet18_backbone(in_channels=1, feature_dim=512, pretrained=False)
         imaging_dim = 512
     else:
         backbone = Simple3DCNN()
         imaging_dim = 128
+
     model = FusionModel(
         imaging_backbone=backbone,
-        tabular_dim=TABULAR_DIM,
+        tabular_dim=tabular_dim,
         imaging_dim=imaging_dim,
         num_classes=2,
     )
-    checkpoint = Path(MODEL_CHECKPOINT)
-    if checkpoint.exists():
-        model.load_state_dict(torch.load(checkpoint, map_location=_device))
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
     return model
 
 
