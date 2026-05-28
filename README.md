@@ -18,18 +18,17 @@ This repo now contains the first pass of the AI brain scaffold: multimodal data 
 2. Run the synthetic training loop:
 	- python scripts/train_brain.py --synthetic
 
-### Checkpoint Recovery
-If the `.pt` files appear as tiny Git LFS pointers after a pull, restore them with:
+### Checkpoints
+Use the checkpoint-only helper to move the model files between PCs:
 
 ```bash
-python scripts/restore_checkpoints.py
+python scripts/checkpoints.py pull
 ```
 
-If you prefer the raw Git LFS command, use:
+To send updated checkpoints from the current machine:
 
 ```bash
-git lfs install
-git lfs pull
+python scripts/checkpoints.py push --message "Update checkpoints"
 ```
 
 ### Dashboard + API
