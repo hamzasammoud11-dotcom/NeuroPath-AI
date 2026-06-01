@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Iterable
+
+ROOT_PATH = Path(__file__).resolve().parents[1]
+SRC_PATH = ROOT_PATH / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
 import numpy as np
 from PIL import Image
@@ -58,6 +64,17 @@ class AugmentedImageDataset(Dataset):
         return vol_t, features, label_t
 
 
+def resolve_data_dir(data_dir: Path) -> Path:
+    if data_dir.exists():
+        return data_dir
+
+    fallback = Path(__file__).resolve().parents[1] / "src" / "neuro_path_ai" / "data" / data_dir
+    if fallback.exists():
+        return fallback
+
+    return data_dir
+
+
 def train(
     data_dir: Path,
     batch_size: int,
@@ -66,6 +83,8 @@ def train(
     lr: float,
     depth: int,
 ):
+    data_dir = resolve_data_dir(data_dir)
+    print(f"Resolved dataset directory: {data_dir}")
     classes = {
         "NonDemented": 0,
         "VeryMildDemented": 1,
@@ -90,7 +109,7 @@ def train(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
 
-    checkpoint_path = Path("artifacts/checkpoints/best_model.pt")
+    checkpoint_path = ROOT_PATH / "artifacts" / "checkpoints" / "best_model.pt"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
     best_sensitivity = -1.0

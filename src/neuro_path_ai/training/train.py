@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from typing import Iterable
-
 import torch
 from torch import nn
 from torch.utils.data import DataLoader

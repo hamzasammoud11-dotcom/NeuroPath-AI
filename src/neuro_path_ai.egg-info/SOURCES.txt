@@ -5,6 +5,7 @@ src/neuro_path_ai/config.py
 src/neuro_path_ai.egg-info/PKG-INFO
 src/neuro_path_ai.egg-info/SOURCES.txt
 src/neuro_path_ai.egg-info/dependency_links.txt
+src/neuro_path_ai.egg-info/requires.txt
 src/neuro_path_ai.egg-info/top_level.txt
 src/neuro_path_ai/api/__init__.py
 src/neuro_path_ai/api/app.py

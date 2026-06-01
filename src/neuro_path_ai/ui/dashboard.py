@@ -736,7 +736,7 @@ def main() -> None:
             with st.spinner("🧠 NeuroPath AI is analyzing your scan..."):
                 response = _call_api(predict_url, uploaded, clinical_payload)
             if response is not None:
-                _render_results(uploaded, response)
+                _render_results(uploaded, response, clinical_payload)
 
 
 def _call_api(api_url: str, uploaded: st.runtime.uploaded_file_manager.UploadedFile, clinical_payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -762,7 +762,7 @@ def _call_api(api_url: str, uploaded: st.runtime.uploaded_file_manager.UploadedF
     return result.json()
 
 
-def _render_results(uploaded: st.runtime.uploaded_file_manager.UploadedFile, response: dict[str, Any]) -> None:
+def _render_results(uploaded: st.runtime.uploaded_file_manager.UploadedFile, response: dict[str, Any], clinical_payload: dict[str, Any]) -> None:
     probability = response.get("probability")
     uncertainty = response.get("uncertainty")
     warning = response.get("warning")
@@ -922,15 +922,24 @@ def _render_results(uploaded: st.runtime.uploaded_file_manager.UploadedFile, res
         # Download section
         st.markdown('<div style="margin-top: 16px; margin-bottom: 8px;"><strong>📥 Download Report</strong></div>', 
                    unsafe_allow_html=True)
-        report_bytes = _build_pdf_report(uploaded.name, probability, uncertainty, warning, heatmap_path)
+        report_bytes, report_name, report_mime = _build_report(
+            uploaded.name,
+            probability,
+            uncertainty,
+            warning,
+            heatmap_path,
+            clinical_payload,
+        )
         if report_bytes is not None:
             st.download_button(
-                label="📄 Download PDF Report",
+                label="📄 Download Report",
                 data=report_bytes,
-                file_name=f"NeuroPath_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                use_container_width=True
+                file_name=report_name,
+                mime=report_mime,
+                use_container_width=True,
             )
+        else:
+            st.warning("Unable to generate a report. Install the required PDF dependency or try again.")
 
 
 
@@ -1021,12 +1030,100 @@ def _plot_volume(volume: np.ndarray) -> "go.Figure | None":
     return fig
 
 
+def _build_report(
+    filename: str,
+    probability: float | None,
+    uncertainty: float | None,
+    warning: str | None,
+    heatmap_path: str | None,
+    clinical_payload: dict[str, Any],
+) -> tuple[bytes | None, str, str]:
+    if FPDF is not None:
+        try:
+            pdf_bytes = _build_pdf_report(
+                filename,
+                probability,
+                uncertainty,
+                warning,
+                heatmap_path,
+                clinical_payload,
+            )
+            if pdf_bytes is not None:
+                return pdf_bytes, f"NeuroPath_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", "application/pdf"
+        except Exception:
+            pass
+
+    text_bytes = _build_text_report(
+        filename,
+        probability,
+        uncertainty,
+        warning,
+        heatmap_path,
+        clinical_payload,
+    )
+    return text_bytes, f"NeuroPath_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "text/plain"
+
+
+def _build_text_report(
+    filename: str,
+    probability: float | None,
+    uncertainty: float | None,
+    warning: str | None,
+    heatmap_path: str | None,
+    clinical_payload: dict[str, Any],
+) -> bytes:
+    clinical_features = clinical_payload.get("clinical_features", [])
+    gender = clinical_payload.get("gender", "N/A")
+    lines = [
+        "NeuroPath AI Pro Clinical Report",
+        "=================================",
+        f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Input File: {filename}",
+        f"Gender: {gender}",
+        f"Clinical Features: {', '.join(str(v) for v in clinical_features)}",
+        "",
+        "Diagnostic Results",
+        "------------------",
+        f"Alzheimer's Probability: {(probability or 0) * 100:.2f}%",
+        f"Model Uncertainty: {uncertainty or 0:.4f}",
+        f"Data Quality: {warning or 'Optimal'}",
+    ]
+
+    prob_pct = (probability or 0) * 100
+    if prob_pct < 30:
+        lines.append("Risk Assessment: Low Risk - Continue regular monitoring")
+    elif prob_pct < 60:
+        lines.append("Risk Assessment: Moderate Risk - Further testing recommended")
+    else:
+        lines.append("Risk Assessment: High Risk - Specialist consultation recommended")
+
+    if uncertainty is not None and uncertainty > 0.4:
+        lines.extend([
+            "",
+            "NOTE: Model reports elevated uncertainty.",
+            "Consider re-running with original DICOM/NIfTI for improved precision.",
+        ])
+
+    if heatmap_path and Path(heatmap_path).exists():
+        lines.append("")
+        lines.append(f"Heatmap: {heatmap_path}")
+
+    lines.extend([
+        "",
+        "This report is generated by NeuroPath AI Pro, a machine learning-based diagnostic support system.",
+        "Results should be reviewed by qualified medical professionals and not used as sole basis for clinical decisions.",
+    ])
+
+    return "\n".join(lines).encode("utf-8")
+
+
 def _build_pdf_report(
     filename: str,
     probability: float | None,
     uncertainty: float | None,
     warning: str | None,
     heatmap_path: str | None,
+    clinical_payload: dict[str, Any],
 ) -> bytes | None:
     if FPDF is None:
         return None

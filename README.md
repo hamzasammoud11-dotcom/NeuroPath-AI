@@ -15,6 +15,7 @@ This repo now contains the first pass of the AI brain scaffold: multimodal data 
 ### Quickstart (Smoke Test)
 1. Create a Python environment and install dependencies:
 	- pip install -r requirements.txt
+	- pip install -e .
 2. Run the synthetic training loop:
 	- python scripts/train_brain.py --synthetic
 
@@ -32,11 +33,16 @@ python scripts/checkpoints.py push --message "Update checkpoints"
 ```
 
 ### Dashboard + API
-1. Start the FastAPI server (optional if using localhost auto-start):
+1. Install the local package so `neuro_path_ai` is importable:
+	- pip install -e .
+   If you do not want to install it, make sure `src` is on `PYTHONPATH`.
+	- Windows: `set PYTHONPATH=src`
+	- macOS/Linux: `export PYTHONPATH=src`
+2. Start the FastAPI server (optional if using localhost auto-start):
 	- python -m uvicorn neuro_path_ai.api.app:app --host 0.0.0.0 --port 8000
-2. Launch the Streamlit dashboard:
+3. Launch the Streamlit dashboard:
 	- streamlit run src/neuro_path_ai/ui/dashboard.py
-3. When the API URL is set to http://localhost:8000, the dashboard will auto-start the API if it is not already running.
+4. When the API URL is set to http://localhost:8000, the dashboard will auto-start the API if it is not already running.
 
 ### Next Steps
 - Wire real ADNI manifests into data loaders

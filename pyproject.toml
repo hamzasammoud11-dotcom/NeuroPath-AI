@@ -6,7 +6,27 @@ build-backend = "setuptools.build_meta"
 name = "neuro-path-ai"
 version = "0.1.0"
 dependencies = [
-    # Dependencies can be added here if needed, or read from requirements.txt
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "torch",
+    "nibabel",
+    "scikit-image",
+    "scikit-learn",
+    "monai",
+    "antspyx",
+    "SimpleITK",
+    "wandb",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "opencv-python",
+    "scipy",
+    "pillow",
+    "streamlit",
+    "plotly",
+    "requests",
+    "fpdf2",
 ]
 
 [tool.setuptools.packages.find]
