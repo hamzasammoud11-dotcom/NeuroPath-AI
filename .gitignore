@@ -57,6 +57,8 @@ artifacts/oasis1-cuda-fix-001/*
 !artifacts/oasis1-cuda-fix-001/app-v004/**
 !artifacts/oasis1-cuda-fix-001/app-v005/
 !artifacts/oasis1-cuda-fix-001/app-v005/**
+!artifacts/oasis1-cuda-fix-001/app-v006/
+!artifacts/oasis1-cuda-fix-001/app-v006/**
 !artifacts/oasis1-cuda-fix-001/inference-v003/
 !artifacts/oasis1-cuda-fix-001/inference-v003/**
 
