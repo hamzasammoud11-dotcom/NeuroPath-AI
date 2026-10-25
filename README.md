@@ -2,6 +2,10 @@
 NeuroPath AI is a professional-grade, multimodal diagnostic platform designed to assist neurologists in the early detection and progression tracking of Alzheimer’s Disease.
 
 ## Brain Stack (Phase 1)
+For the Kaggle image dataset, use the [2D training workflow](docs/TRAINING_2D.md)
+and [cloud notebook](notebooks/train_cloud.ipynb). The synthetic brain stack
+below is only a smoke test, not the real-data training pipeline.
+
 This repo now contains the first pass of the AI brain scaffold: multimodal data loading, imaging model, fusion head, and a simple training loop for smoke testing.
 
 ### Project Structure
@@ -33,6 +37,12 @@ python scripts/checkpoints.py push --message "Update checkpoints"
 ```
 
 ### Dashboard + API
+The API requires a compatible checkpoint at `artifacts/checkpoints/best_model.pt`.
+To use another checkpoint, set `NEUROPATH_MODEL` to its path before starting
+the API. If loading fails, `/health` and `/predict` return HTTP 503; check
+the server logs for the cause. Every dashboard upload is sent to the API.
+A loadable checkpoint does not establish model accuracy or clinical validity.
+
 1. Install the local package so `neuro_path_ai` is importable:
 	- pip install -e .
    If you do not want to install it, make sure `src` is on `PYTHONPATH`.

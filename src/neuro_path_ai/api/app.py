@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from neuro_path_ai.data.ingestion import (
 from neuro_path_ai.models.explainability import GradCAM3D, export_cam_to_nifti, find_default_target_layer
 from neuro_path_ai.models.fusion import FusionModel
 from neuro_path_ai.models.imaging import Simple3DCNN, build_resnet18_backbone
+from neuro_path_ai.models.image2d import ImageClassifier2D, load_image_checkpoint, preprocess_image
 
 try:
     import nibabel as nib
@@ -41,26 +43,28 @@ TABULAR_DIM_ENV = os.getenv("NEUROPATH_TABULAR_DIM")
 _model: FusionModel | None = None
 _target_layer = None
 _device = None
+_model_error = "Model not initialized"
 _tabular_dim: int = 14  # Default value, will be overridden at startup
 TABULAR_DIM: int = 14  # Backward-compatible alias for any lingering references
 
 
-def _load_checkpoint_state(checkpoint: Path) -> dict[str, torch.Tensor] | None:
-    if not checkpoint.exists():
-        return None
-    try:
-        import torch
-    except ImportError:
-        # Torch not available in this environment; skip loading checkpoints.
-        return None
+def _load_checkpoint_state(checkpoint: Path) -> dict[str, torch.Tensor]:
+    if not checkpoint.is_file():
+        raise FileNotFoundError("Model checkpoint is missing. Configure NEUROPATH_MODEL with a valid checkpoint.")
+    import torch
 
     payload = torch.load(checkpoint, map_location=_device, weights_only=False)
     if isinstance(payload, dict) and "model_state_dict" in payload:
         state_dict = payload["model_state_dict"]
     else:
         state_dict = payload
-    if not isinstance(state_dict, dict):
+    if not isinstance(state_dict, dict) or not state_dict:
         raise ValueError("Checkpoint does not contain a model state dict.")
+    if any(not isinstance(key, str) or not isinstance(value, torch.Tensor)
+           for key, value in state_dict.items()):
+        raise ValueError("Checkpoint state dict must contain named tensors.")
+    if any(not torch.isfinite(value).all().item() for value in state_dict.values()):
+        raise ValueError("Checkpoint contains non-finite weights.")
     return state_dict
 
 
@@ -107,9 +111,11 @@ def _resolve_tabular_dim(state_dict: dict[str, torch.Tensor] | None) -> int:
     return inferred if inferred is not None else 14
 
 
-def _load_model() -> FusionModel:
-    checkpoint = Path(MODEL_CHECKPOINT)
-    state_dict = _load_checkpoint_state(checkpoint)
+def _load_model(state_dict: dict[str, torch.Tensor] | None = None) -> FusionModel:
+    if state_dict is None:
+        state_dict = _load_checkpoint_state(Path(MODEL_CHECKPOINT))
+    if "features.0.weight" in state_dict:
+        return load_image_checkpoint(MODEL_CHECKPOINT, _device)
     backbone_name = _resolve_backbone(state_dict)
     tabular_dim = _resolve_tabular_dim(state_dict)
 
@@ -127,37 +133,41 @@ def _load_model() -> FusionModel:
         imaging_dim=imaging_dim,
         num_classes=2,
     )
-    if state_dict is not None:
-        model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=True)
     return model
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _model, _target_layer, _tabular_dim, TABULAR_DIM
-    checkpoint = Path(MODEL_CHECKPOINT)
-    state_dict = _load_checkpoint_state(checkpoint)
-    _tabular_dim = _resolve_tabular_dim(state_dict)
-    TABULAR_DIM = _tabular_dim
+    global _model, _target_layer, _tabular_dim, TABULAR_DIM, _model_error
+    _model = None
+    _target_layer = None
+    _model_error = "Model not initialized"
     try:
         import torch
 
         global _device
         _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        _model = _load_model().to(_device)
-        _model.eval()
-        _target_layer = find_default_target_layer(_model.imaging_backbone)
-    except ImportError:
-        # ML runtime not present; leave model as None so API can still run.
-        _model = None
-        _target_layer = None
+        state_dict = _load_checkpoint_state(Path(MODEL_CHECKPOINT))
+        model = _load_model(state_dict).to(_device)
+        model.eval()
+        target_layer = (None if isinstance(model, ImageClassifier2D)
+                        else find_default_target_layer(model.imaging_backbone))
+        _tabular_dim = _resolve_tabular_dim(state_dict)
+        TABULAR_DIM = _tabular_dim
+        _target_layer = target_layer
+        _model = model
+        _model_error = None
+    except Exception:
+        _model_error = "Model unavailable: checkpoint missing, invalid, or incompatible, or ML runtime unavailable. Check server logs and NEUROPATH_MODEL."
+        logging.getLogger(__name__).exception("Model initialization failed")
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     if _model is None:
-        raise HTTPException(status_code=503, detail="Model not initialized")
+        raise HTTPException(status_code=503, detail=_model_error)
     return {"status": "ok"}
 
 
@@ -166,6 +176,10 @@ async def predict(
     nifti_file: UploadFile = File(...),
     clinical_json: str = Form(...),
 ) -> dict[str, Any]:
+    if _model is None:
+        raise HTTPException(status_code=503, detail=_model_error)
+    if isinstance(_model, ImageClassifier2D):
+        return await _predict_image_2d(nifti_file)
     # Add a debug try/except to return trace details for local testing
     try:
         import torch
@@ -189,9 +203,6 @@ async def predict(
 
         volume, grid_meta, warning = _load_volume(tmp_path)
         clinical, tabular_warning = _prepare_tabular_features(clinical_vector)
-
-        if _model is None or _target_layer is None:
-            raise HTTPException(status_code=500, detail="Model not initialized")
 
         volume = volume.to(_device)
         clinical = clinical.to(_device)
@@ -241,6 +252,30 @@ async def predict(
         tb = traceback.format_exc()
         # Return the traceback in the HTTPException detail for debugging
         raise HTTPException(status_code=500, detail={"error": str(exc), "trace": tb})
+
+
+async def _predict_image_2d(upload: UploadFile) -> dict[str, Any]:
+    from io import BytesIO
+    from PIL import Image, UnidentifiedImageError
+    import torch
+
+    if Path(upload.filename or "").suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp"}:
+        raise HTTPException(status_code=400, detail="The 2D model accepts a single JPG/PNG/BMP MRI slice, not NIfTI/DICOM or a montage.")
+    try:
+        with Image.open(BytesIO(await upload.read())) as image:
+            tensor = preprocess_image(image).unsqueeze(0).to(_device)
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    with torch.no_grad():
+        probability = float(_model(tensor).softmax(1)[0, 1].item())
+    patient_separation = getattr(_model, "patient_separation_verified", False)
+    split_warning = ("Patient separation checked against supplied IDs; source identity mapping is not independently verified. "
+                     if patient_separation else "Patient separation is unverified. ")
+    return {"probability": probability, "prediction": int(probability >= 0.5),
+            "model_type": "image2d_v1", "heatmap_path": None,
+            "patient_separation_verified": patient_separation,
+            "warning": "Image-only research baseline: clinical/genetic inputs are not used. "
+                       + split_warning + "Probability calibration is unverified. Upload one MRI slice; montages and full scans are unsupported."}
 
 
 def _append_gender_feature(clinical_vector: list[float], gender_value: str | int | float) -> list[float]:

@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -38,7 +37,6 @@ except ImportError:  # pragma: no cover - optional dependency
     go = None
 
 
-_REFERENCE_CAPTURE_SHA256 = "b745c088fb826b77a2df25b211a323f3b28d8b9004be1c4c3c7048dd0f681f0d"
 
 
 st.set_page_config(page_title="NeuroPath AI Pro", layout="wide", initial_sidebar_state="expanded")
@@ -973,11 +971,6 @@ def _set_active_page(page: str) -> None:
         st.experimental_set_query_params(page=page)
 
 
-def _is_reference_capture(uploaded: st.runtime.uploaded_file_manager.UploadedFile) -> bool:
-    digest = hashlib.sha256(uploaded.getvalue()).hexdigest().lower()
-    return digest == _REFERENCE_CAPTURE_SHA256
-
-
 def _render_landing_page() -> None:
     st.markdown('<style>[data-testid="stSidebar"]{display:none !important;} [data-testid="stAppViewContainer"]{margin-left:0 !important;}</style>', unsafe_allow_html=True)
     st.markdown('<div class="landing-page"><div class="landing-shell">', unsafe_allow_html=True)
@@ -1146,15 +1139,6 @@ def _render_analysis_page() -> None:
 
 
 def _call_api(api_url: str, uploaded: st.runtime.uploaded_file_manager.UploadedFile, clinical_payload: dict[str, Any]) -> dict[str, Any] | None:
-    if _is_reference_capture(uploaded):
-        return {
-            "probability": 0.0,
-            "uncertainty": 0.0,
-            "warning": None,
-            "heatmap_path": None,
-            "prediction": "NonDemented",
-        }
-
     normalized_url = _normalize_api_url(api_url)
     _, predict_url, health_url, _, _ = _resolve_api_urls(normalized_url)
     if not _check_api_health(health_url):
